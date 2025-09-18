@@ -121,8 +121,22 @@ func (r *FileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// Add finalizer if it doesn't exist
 	if !containsString(file.Finalizers, finalizerName) {
-		file.Finalizers = append(file.Finalizers, finalizerName)
-		if err := r.Update(ctx, file); err != nil {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			// Get the latest version of the resource
+			latest := &githubv1alpha1.File{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(file), latest); err != nil {
+				return err
+			}
+
+			// Add finalizer if it doesn't exist
+			if !containsString(latest.Finalizers, finalizerName) {
+				latest.Finalizers = append(latest.Finalizers, finalizerName)
+				return r.Update(ctx, latest)
+			}
+			return nil
+		})
+
+		if err != nil {
 			log.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -507,8 +521,19 @@ func (r *FileReconciler) handleFileDeletion(ctx context.Context, file *githubv1a
 	}
 
 	// Remove the finalizer to allow Kubernetes to delete the resource
-	file.Finalizers = removeString(file.Finalizers, finalizerName)
-	if err := r.Update(ctx, file); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get the latest version of the resource
+		latest := &githubv1alpha1.File{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(file), latest); err != nil {
+			return err
+		}
+
+		// Remove the finalizer
+		latest.Finalizers = removeString(latest.Finalizers, finalizerName)
+		return r.Update(ctx, latest)
+	})
+
+	if err != nil {
 		log.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
