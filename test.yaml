@@ -1,15 +1,16 @@
 apiVersion: github.example.com/v1alpha1
 kind: File
 metadata:
-  name: test-file
+  name: test-file-2
 spec:
   fileContent: |
     apiVersion: v1
     kind: ConfigMap
     metadata:
       name: test-config
+      test: hello
     data:
       key: value
   repositoryURL: "nadavshaham/project"
   branch: "master"
-  filePath: "configs/test-config.yaml"
+  filePath: "configs/test-config-3.yaml"
