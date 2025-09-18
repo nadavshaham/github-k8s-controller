@@ -3,5 +3,13 @@ kind: File
 metadata:
   name: test-file
 spec:
-  size: 3
-  containerPort: 11211
+  fileContent: |
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: test-config
+    data:
+      key: value
+  repositoryURL: "nadavshaham/project"
+  branch: "master"
+  filePath: "configs/test-config.yaml"

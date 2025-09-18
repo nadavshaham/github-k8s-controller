@@ -28,39 +28,59 @@ type FileSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// FileContent defines the content of the file
+	// FileContent defines the YAML content to be deployed to the repository
+	// This should contain valid YAML that will be written to the specified file path
+	// +kubebuilder:validation:Required
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
-	FileContent string `json:"FileContent,omitempty"`
+	FileContent string `json:"fileContent"`
 
-	// RepositoryURL defines the URL of the git repository
+	// RepositoryURL defines the URL of the git repository where the file should be deployed
+	// Format: owner/repo (e.g., "myorg/myrepo")
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$`
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
-	RepositoryURL string `json:"repositoryURL,omitempty"`
+	RepositoryURL string `json:"repositoryURL"`
 
-	// Branch defines the branch of the git repository
+	// Branch defines the branch of the git repository where the file should be deployed
+	// If not specified, defaults to "main"
+	// +kubebuilder:default="main"
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Branch string `json:"branch,omitempty"`
 
-	// FilePath defines the path where the file should be created
+	// FilePath defines the path where the file should be created in the repository
+	// Should include the filename and extension (e.g., "config/deployment.yaml")
+	// +kubebuilder:validation:Required
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
-	FilePath string `json:"filePath,omitempty"`
+	FilePath string `json:"filePath"`
+
+	// CommitMessage defines the commit message to use when creating/updating the file
+	// If not specified, a default message will be generated
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	CommitMessage string `json:"commitMessage,omitempty"`
 }
 
 // FileStatus defines the observed state of File
 type FileStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	// Represents the observations of a Memcached's current state.
-	// Memcached.status.conditions.type are: "Available", "Progressing", and "Degraded"
-	// Memcached.status.conditions.status are one of True, False, Unknown.
-	// Memcached.status.conditions.reason the value should be a CamelCase string and producers of specific
-	// condition types may define expected values and meanings for this field, and whether the values
-	// are considered a guaranteed API.
-	// Memcached.status.conditions.Message is a human readable message indicating details about the transition.
-	// For further information see: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
 
-	// Conditions store the status conditions of the Memcached instances
+	// Conditions store the status conditions of the File deployment
+	// Condition types are: "Available", "Progressing", and "Degraded"
+	// Condition status can be True, False, or Unknown
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
+
+	// LastDeployedCommit contains the SHA of the commit that was last deployed
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	LastDeployedCommit string `json:"lastDeployedCommit,omitempty"`
+
+	// LastDeployedTime contains the timestamp of the last successful deployment
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	LastDeployedTime *metav1.Time `json:"lastDeployedTime,omitempty"`
+
+	// DeployedFileURL contains the URL to the deployed file in the GitHub repository
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	DeployedFileURL string `json:"deployedFileURL,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -39,25 +39,46 @@ spec:
           spec:
             description: FileSpec defines the desired state of File
             properties:
-              FileContent:
-                description: FileContent defines the content of the file
-                type: string
               branch:
-                description: Branch defines the branch of the git repository
+                default: main
+                description: |-
+                  Branch defines the branch of the git repository where the file should be deployed
+                  If not specified, defaults to "main"
+                type: string
+              commitMessage:
+                description: |-
+                  CommitMessage defines the commit message to use when creating/updating the file
+                  If not specified, a default message will be generated
+                type: string
+              fileContent:
+                description: |-
+                  FileContent defines the YAML content to be deployed to the repository
+                  This should contain valid YAML that will be written to the specified file path
                 type: string
               filePath:
-                description: FilePath defines the path where the file should be created
+                description: |-
+                  FilePath defines the path where the file should be created in the repository
+                  Should include the filename and extension (e.g., "config/deployment.yaml")
                 type: string
               repositoryURL:
-                description: RepositoryURL defines the URL of the git repository
+                description: |-
+                  RepositoryURL defines the URL of the git repository where the file should be deployed
+                  Format: owner/repo (e.g., "myorg/myrepo")
+                pattern: ^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$
                 type: string
+            required:
+            - fileContent
+            - filePath
+            - repositoryURL
             type: object
           status:
             description: FileStatus defines the observed state of File
             properties:
               conditions:
-                description: Conditions store the status conditions of the Memcached
-                  instances
+                description: |-
+                  Conditions store the status conditions of the File deployment
+                  Condition types are: "Available", "Progressing", and "Degraded"
+                  Condition status can be True, False, or Unknown
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -113,6 +134,19 @@ spec:
                   - type
                   type: object
                 type: array
+              deployedFileURL:
+                description: DeployedFileURL contains the URL to the deployed file
+                  in the GitHub repository
+                type: string
+              lastDeployedCommit:
+                description: LastDeployedCommit contains the SHA of the commit that
+                  was last deployed
+                type: string
+              lastDeployedTime:
+                description: LastDeployedTime contains the timestamp of the last successful
+                  deployment
+                format: date-time
+                type: string
             type: object
         type: object
     served: true

@@ -18,12 +18,16 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/google/go-github/v57/github"
 	"golang.org/x/oauth2"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -88,20 +92,117 @@ type FileReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 func (r *FileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	log := log.FromContext(ctx)
+
+	// Fetch the File resource
 	file := &githubv1alpha1.File{}
 	err := r.Get(ctx, req.NamespacedName, file)
-	setupLog.Info("reconciling file", "file", file.Name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// Object deleted, nothing to do
-			setupLog.Info("deleting file", "file", file.Name)
+			log.Info("File resource deleted", "name", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
+		log.Error(err, "Failed to get File resource")
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	log.Info("Reconciling File", "name", file.Name, "namespace", file.Namespace)
+
+	// Check if GitHub client is available
+	if r.GitHubClient == nil {
+		err := fmt.Errorf("GitHub client not initialized")
+		log.Error(err, "Cannot proceed without GitHub client")
+
+		// Update status with error condition
+		condition := r.createCondition("Available", "GitHubClientUnavailable",
+			"GitHub client is not initialized", metav1.ConditionFalse)
+		if updateErr := r.updateFileStatus(ctx, file, condition, "", ""); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+		return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
+	}
+
+	// Validate required fields
+	if file.Spec.RepositoryURL == "" {
+		err := fmt.Errorf("repositoryURL is required")
+		log.Error(err, "Invalid File spec")
+
+		condition := r.createCondition("Available", "InvalidSpec",
+			"repositoryURL field is required", metav1.ConditionFalse)
+		if updateErr := r.updateFileStatus(ctx, file, condition, "", ""); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if file.Spec.FilePath == "" {
+		err := fmt.Errorf("filePath is required")
+		log.Error(err, "Invalid File spec")
+
+		condition := r.createCondition("Available", "InvalidSpec",
+			"filePath field is required", metav1.ConditionFalse)
+		if updateErr := r.updateFileStatus(ctx, file, condition, "", ""); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if file.Spec.FileContent == "" {
+		err := fmt.Errorf("fileContent is required")
+		log.Error(err, "Invalid File spec")
+
+		condition := r.createCondition("Available", "InvalidSpec",
+			"fileContent field is required", metav1.ConditionFalse)
+		if updateErr := r.updateFileStatus(ctx, file, condition, "", ""); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Set status to Progressing
+	progressCondition := r.createCondition("Progressing", "DeployingFile",
+		"Deploying file to GitHub repository", metav1.ConditionTrue)
+	if err := r.updateFileStatus(ctx, file, progressCondition, "", ""); err != nil {
+		log.Error(err, "Failed to update status to progressing")
+	}
+
+	// Deploy the file to GitHub
+	if err := r.deployFileToGitHub(ctx, file); err != nil {
+		log.Error(err, "Failed to deploy file to GitHub")
+
+		// Update status with error condition
+		condition := r.createCondition("Available", "DeploymentFailed",
+			fmt.Sprintf("Failed to deploy file: %v", err), metav1.ConditionFalse)
+		if updateErr := r.updateFileStatus(ctx, file, condition, "", ""); updateErr != nil {
+			log.Error(updateErr, "Failed to update status")
+		}
+
+		// Requeue after some time to retry
+		return ctrl.Result{RequeueAfter: time.Minute * 2}, nil
+	}
+
+	// Update status with success condition
+	successCondition := r.createCondition("Available", "DeploymentSuccessful",
+		"File successfully deployed to GitHub repository", metav1.ConditionTrue)
+
+	// Generate the file URL
+	branch := file.Spec.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	fileURL := fmt.Sprintf("https://github.com/%s/blob/%s/%s",
+		file.Spec.RepositoryURL, branch, file.Spec.FilePath)
+
+	if err := r.updateFileStatus(ctx, file, successCondition, "latest", fileURL); err != nil {
+		log.Error(err, "Failed to update status with success")
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Successfully reconciled File", "name", file.Name, "fileURL", fileURL)
+
+	// Requeue after 10 minutes to check for any drift
+	return ctrl.Result{RequeueAfter: time.Minute * 10}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -142,5 +243,206 @@ func (r *FileReconciler) testGitHubConnection(ctx context.Context) {
 	setupLog.Info("Successfully fetched repositories", "count", len(repos))
 	for _, repo := range repos {
 		setupLog.Info("Repository found", "name", repo.GetName(), "full_name", repo.GetFullName())
+	}
+}
+
+// deployFileToGitHub deploys the YAML content to the specified GitHub repository
+func (r *FileReconciler) deployFileToGitHub(ctx context.Context, file *githubv1alpha1.File) error {
+	// Parse repository URL (format: owner/repo)
+	repoParts := strings.Split(file.Spec.RepositoryURL, "/")
+	if len(repoParts) != 2 {
+		return fmt.Errorf("invalid repository URL format, expected 'owner/repo', got: %s", file.Spec.RepositoryURL)
+	}
+	owner, repo := repoParts[0], repoParts[1]
+
+	// Validate owner and repo names
+	if owner == "" || repo == "" {
+		return fmt.Errorf("invalid repository URL: owner and repo cannot be empty")
+	}
+
+	// Set default branch if not specified
+	branch := file.Spec.Branch
+	if branch == "" {
+		branch = "main"
+	}
+
+	// Set default commit message if not specified
+	commitMessage := file.Spec.CommitMessage
+	if commitMessage == "" {
+		commitMessage = fmt.Sprintf("Deploy %s via Kubernetes File CRD", file.Spec.FilePath)
+	}
+
+	setupLog.Info("Deploying file to GitHub",
+		"owner", owner,
+		"repo", repo,
+		"branch", branch,
+		"filePath", file.Spec.FilePath)
+
+	// First, validate that the repository exists and is accessible
+	repoInfo, _, err := r.GitHubClient.Repositories.Get(ctx, owner, repo)
+	if err != nil {
+		return fmt.Errorf("repository %s/%s not found or not accessible: %w", owner, repo, err)
+	}
+
+	// Check if the branch exists
+	branchInfo, _, err := r.GitHubClient.Repositories.GetBranch(ctx, owner, repo, branch, 1)
+	if err != nil {
+		return fmt.Errorf("branch '%s' not found in repository %s/%s: %w", branch, owner, repo, err)
+	}
+
+	setupLog.Info("Repository and branch validated",
+		"repoFullName", repoInfo.GetFullName(),
+		"branchSHA", branchInfo.GetCommit().GetSHA())
+
+	// Check if the file already exists
+	existingFile, _, getResp, err := r.GitHubClient.Repositories.GetContents(
+		ctx, owner, repo, file.Spec.FilePath, &github.RepositoryContentGetOptions{
+			Ref: branch,
+		})
+
+	var sha *string
+	var needsUpdate bool = true
+	if err != nil && getResp.StatusCode != 404 {
+		return fmt.Errorf("error checking if file exists: %w", err)
+	}
+
+	if existingFile != nil {
+		sha = existingFile.SHA
+		
+		// Decode existing file content and compare with desired content
+		existingContent, err := existingFile.GetContent()
+		if err != nil {
+			return fmt.Errorf("failed to decode existing file content: %w", err)
+		}
+		
+		// Compare content to see if update is needed
+		if strings.TrimSpace(existingContent) == strings.TrimSpace(file.Spec.FileContent) {
+			setupLog.Info("File content is already up to date, skipping deployment", "sha", *sha)
+			needsUpdate = false
+		} else {
+			setupLog.Info("File content differs, will update", "sha", *sha)
+		}
+	} else {
+		setupLog.Info("File does not exist, will create new file")
+	}
+
+	// Skip deployment if content hasn't changed
+	if !needsUpdate {
+		return nil
+	}
+
+	// Validate file content is not empty and appears to be valid YAML
+	if err := r.validateYAMLContent(file.Spec.FileContent); err != nil {
+		return fmt.Errorf("invalid YAML content: %w", err)
+	}
+
+	// Prepare the file content
+	contentBytes := []byte(file.Spec.FileContent)
+
+	// Create or update the file
+	fileContent := &github.RepositoryContentFileOptions{
+		Message: &commitMessage,
+		Content: contentBytes,
+		Branch:  &branch,
+		SHA:     sha,
+		Committer: &github.CommitAuthor{
+			Name:  github.String("Kubernetes File Controller"),
+			Email: github.String("file-controller@k8s.local"),
+		},
+	}
+
+	var result *github.RepositoryContentResponse
+	var resp *github.Response
+	if sha != nil {
+		// Update existing file
+		result, resp, err = r.GitHubClient.Repositories.UpdateFile(
+			ctx, owner, repo, file.Spec.FilePath, fileContent)
+	} else {
+		// Create new file
+		result, resp, err = r.GitHubClient.Repositories.CreateFile(
+			ctx, owner, repo, file.Spec.FilePath, fileContent)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to create/update file in GitHub (status: %d): %w", resp.StatusCode, err)
+	}
+
+	setupLog.Info("Successfully deployed file to GitHub",
+		"commit", result.Commit.GetSHA(),
+		"fileURL", result.Content.GetHTMLURL())
+
+	return nil
+}
+
+// validateYAMLContent performs basic validation on the YAML content
+func (r *FileReconciler) validateYAMLContent(content string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return fmt.Errorf("content cannot be empty")
+	}
+
+	// Basic YAML syntax validation - check for common issues
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue // Empty lines and comments are fine
+		}
+
+		// Check for basic YAML structure
+		if strings.Contains(line, "apiVersion:") ||
+			strings.Contains(line, "kind:") ||
+			strings.Contains(line, "metadata:") ||
+			strings.Contains(line, "spec:") ||
+			strings.Contains(line, "data:") ||
+			strings.HasSuffix(line, ":") ||
+			strings.HasPrefix(line, "-") ||
+			strings.Contains(line, ": ") {
+			continue // Looks like YAML
+		}
+
+		// If we've seen 10+ lines and none look like YAML, it might not be YAML
+		if i > 10 {
+			setupLog.Info("Content validation warning: content may not be valid YAML", "line", i+1, "content", line)
+			break
+		}
+	}
+
+	return nil
+}
+
+// updateFileStatus updates the status of the File CRD with deployment information
+func (r *FileReconciler) updateFileStatus(ctx context.Context, file *githubv1alpha1.File, condition metav1.Condition, commitSHA, fileURL string) error {
+	// Update the status fields
+	now := metav1.NewTime(time.Now())
+	file.Status.LastDeployedTime = &now
+	file.Status.LastDeployedCommit = commitSHA
+	file.Status.DeployedFileURL = fileURL
+
+	// Update or add the condition
+	conditionExists := false
+	for i, cond := range file.Status.Conditions {
+		if cond.Type == condition.Type {
+			file.Status.Conditions[i] = condition
+			conditionExists = true
+			break
+		}
+	}
+	if !conditionExists {
+		file.Status.Conditions = append(file.Status.Conditions, condition)
+	}
+
+	// Update the status in the cluster
+	return r.Status().Update(ctx, file)
+}
+
+// createCondition creates a new condition for the File status
+func (r *FileReconciler) createCondition(conditionType, reason, message string, status metav1.ConditionStatus) metav1.Condition {
+	return metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.NewTime(time.Now()),
 	}
 }
