@@ -41,13 +41,15 @@ import (
 )
 
 var (
+	// the scheme contains the mappings between Go types and Kubernetes GroupVersionKinds
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
 
 func init() {
+	// Register the built-in Kubernetes types (e.g., Pod, Service, ConfigMap, Secret)
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
+	// Register your custom types (e.g., File CRD)
 	utilruntime.Must(githubv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
@@ -120,6 +122,7 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
+	// Create a new manager to provide shared dependencies and start components
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -143,7 +146,10 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
-
+	// Initialize GitHub file reconciler and register it with the manager
+	// The reconciler will be called when File resources are created/updated/deleted
+	// The reconciler will use the manager's client and scheme to interact with the Kubernetes API
+	// and will use an event recorder to record events on File resources
 	if err = (&controller.FileReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
